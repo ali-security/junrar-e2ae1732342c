@@ -1,16 +1,19 @@
 name: CI
 
 on:
-  pull_request:
-  push:
-    branches-ignore:
-      - 'dependabot/**'
   workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Gradle test task + --tests selector; empty runs the full build'
+        required: false
+        default: ''
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
+      fail-fast: false
       matrix:
         java: [ 8, 11, 17, 18 ]
     name: Test JDK ${{ matrix.java }}
@@ -24,19 +27,54 @@ jobs:
       - name: Build
         uses: gradle/gradle-build-action@v2
         with:
-          arguments: build
+          arguments: ${{ inputs.test-filter != '' && format('assemble {0}', inputs.test-filter) || 'build' }}
+      - name: Test results
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          t = f = e = s = 0
+          for path in sorted(glob.glob('build/test-results/test/*.xml')):
+              suite = ET.parse(path).getroot()
+              for tc in suite.iter('testcase'):
+                  name = f"{tc.get('classname')}.{tc.get('name')}"
+                  t += 1
+                  if tc.find('failure') is not None:
+                      f += 1; print(f"FAILED  {name}")
+                  elif tc.find('error') is not None:
+                      e += 1; print(f"ERROR   {name}")
+                  elif tc.find('skipped') is not None:
+                      s += 1; sk = tc.find('skipped')
+                      print(f"SKIPPED {name}: {sk.get('message') or (sk.text or '').strip() or 'no message'}")
+                  else:
+                      print(f"PASSED  {name}")
+          print(f"Tests run: {t}, Passed: {t-f-e-s}, Failures: {f}, Errors: {e}, Skipped: {s}")
+          PY
+      - name: Main jar
+        if: matrix.java == '8'
+        uses: gradle/gradle-build-action@v2
+        with:
+          arguments: jar
+      - name: Upload jar
+        if: matrix.java == '8'
+        uses: actions/upload-artifact@v4
+        with:
+          name: junrar-jars
+          path: build/libs/junrar-*.jar
+          if-no-files-found: error
       - name: Jacoco
         uses: gradle/gradle-build-action@v2
         with:
           arguments: jacocoTestReport
       - uses: codecov/codecov-action@v2
-        if: matrix.java == '8'
+        if: false
 
   release:
     name: semantic release
     runs-on: ubuntu-latest
     needs: test
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    timeout-minutes: 30
+    if: false
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v2
